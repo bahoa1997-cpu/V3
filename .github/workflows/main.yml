@@ -1,0 +1,80 @@
+name: Build APK
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SIGNING_KEY_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Restore optional persistent signing key
+        shell: bash
+        run: |
+          if [[ -n "$SIGNING_KEY_BASE64" ]]; then
+            test -n "$SIGNING_STORE_PASSWORD" && test -n "$SIGNING_KEY_ALIAS" && test -n "$SIGNING_KEY_PASSWORD"
+            printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/offlinetv.jks"
+            echo "SIGNING_STORE_FILE=$RUNNER_TEMP/offlinetv.jks" >> "$GITHUB_ENV"
+          else
+            echo '::warning::Using temporary debug signing key. Updates may require uninstalling previous APK.'
+          fi
+      - name: Compile Java and build APK
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --console=plain assembleDebug 2>&1 | tee build-java.log
+      - name: Upload compilation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Java-build-log
+          path: build-java.log
+          if-no-files-found: ignore
+      - name: Android Lint
+        run: gradle --no-daemon --console=plain lintDebug
+      - name: Verify and package APK
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/OfflineTV-2.0.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/OfflineTV-2.0.apk
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/OfflineTV-2.0.apk > dist/apk-info.txt
+          (cd dist && sha256sum OfflineTV-2.0.apk > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OfflineTV-APK
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-lint-report
+          path: app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/offlinetv.jks"
